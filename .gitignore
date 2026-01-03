@@ -1,2 +1,4 @@
 *test*
 *.json
+*/__pycache__
+.trash
