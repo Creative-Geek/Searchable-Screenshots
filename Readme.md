@@ -15,17 +15,15 @@ A Python application that indexes and enables fast searching of your screenshots
 
 ## Installation
 
+This project uses `uv` package manager, install it at [https://docs.astral.sh/uv](https://docs.astral.sh/uv)
+
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/Creative-Geek/Searchable-Screenshots.git
 cd Searchable-Screenshots
 
-# Create a virtual environment (Windows example)
-python -m venv .venv
-.venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies and create virtual environment
+uv sync
 ```
 
 ## Usage
@@ -33,7 +31,7 @@ pip install -r requirements.txt
 ### Run the GUI
 
 ```bash
-python main.py
+uv run main.py
 ```
 
 The application will open a window where you can add folders, configure settings, and start indexing.
@@ -41,7 +39,7 @@ The application will open a window where you can add folders, configure settings
 ### Index from the command line
 
 ```bash
-python -m src.core.processor --folder "C:\path\to\screenshots"
+uv run src.core.processor --folder "C:\path\to\screenshots"
 ```
 
 This will process the images and populate the local database.
@@ -53,7 +51,7 @@ Open **Settings** in the GUI to adjust:
 - Ollama URL
 - Vision model name
 - Embedding model name
-- Parallel processing count (default = 1)
+- Parallel processing count (default = 1)
 
 ## Contributing
 
