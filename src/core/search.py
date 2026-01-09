@@ -1,4 +1,4 @@
-"""Unified search interface with query routing."""
+"""Unified search interface with query routing and hybrid search."""
 
 from dataclasses import dataclass
 from typing import Optional
@@ -7,6 +7,7 @@ from pathlib import Path
 from ..core.database import Database, Screenshot
 from ..services.vector_store import VectorStore, VectorSearchResult
 from ..services.embedding import EmbeddingService
+from ..services.sparse_embedding import SparseEmbeddingService
 from ..services.reranker import RerankerService
 
 
@@ -15,7 +16,7 @@ class SearchResult:
     """A search result with screenshot data and relevance score."""
     screenshot: Screenshot
     score: float
-    search_type: str  # 'fts' or 'vector'
+    search_type: str  # 'fts', 'vector', 'hybrid', 'hybrid+rerank'
     
     @property
     def file_path(self) -> Path:
@@ -27,21 +28,36 @@ class SearchResult:
 
 
 class SearchEngine:
-    """Unified search engine with FTS5 and vector search."""
+    """Unified search engine with FTS5, vector, and hybrid search."""
     
     def __init__(
         self,
         db: Database,
         vector_store: VectorStore,
         embedding_service: EmbeddingService,
+        sparse_embedding: Optional[SparseEmbeddingService] = None,
         reranker: Optional[RerankerService] = None,
         use_reranker: bool = False,
+        hybrid_weight: float = 0.5,
     ):
+        """Initialize the search engine.
+        
+        Args:
+            db: Database instance
+            vector_store: Qdrant vector store
+            embedding_service: Dense embedding service
+            sparse_embedding: Optional BM25 sparse embedding service
+            reranker: Optional reranker service
+            use_reranker: Whether to apply reranking
+            hybrid_weight: Weight for hybrid search (0.0 = sparse only, 1.0 = dense only)
+        """
         self.db = db
         self.vector_store = vector_store
         self.embedding = embedding_service
+        self.sparse_embedding = sparse_embedding
         self.reranker = reranker
         self.use_reranker = use_reranker and reranker is not None
+        self.hybrid_weight = max(0.0, min(1.0, hybrid_weight))  # Clamp to [0, 1]
     
     def search(
         self,
@@ -52,7 +68,7 @@ class SearchEngine:
         
         Uses query routing:
         - Quoted queries ("like this") → FTS5 exact match
-        - Unquoted queries → Vector semantic search
+        - Unquoted queries → Hybrid search (sparse + dense) if available, otherwise vector search
         
         Args:
             query: Search query
@@ -72,7 +88,11 @@ class SearchEngine:
             exact_query = query[1:-1]
             return self.fts_search(exact_query, limit)
         else:
-            return self.vector_search(query, limit)
+            # Use hybrid search if sparse embedding is available
+            if self.sparse_embedding and self.sparse_embedding.is_fitted:
+                return self.hybrid_search(query, limit)
+            else:
+                return self.vector_search(query, limit)
     
     def fts_search(
         self,
@@ -146,11 +166,105 @@ class SearchEngine:
         
         return results
     
+    def hybrid_search(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> list[SearchResult]:
+        """Perform hybrid search combining sparse BM25 and dense vector scores.
+        
+        The final score is computed as:
+        final = (1 - hybrid_weight) * sparse_score + hybrid_weight * dense_score
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results
+            
+        Returns:
+            List of search results ordered by combined score
+        """
+        # Generate query embedding for dense search
+        query_vector = self.embedding.embed(query)
+        if query_vector is None:
+            # Fall back to sparse-only search
+            return self._sparse_only_search(query, limit)
+        
+        # Get dense vector scores (request more for merging)
+        search_limit = limit * 3
+        vector_results = self.vector_store.search(query_vector, search_limit)
+        
+        # Get sparse BM25 scores (normalized)
+        sparse_scores = {}
+        if self.sparse_embedding and self.sparse_embedding.is_fitted:
+            for doc_id, score in self.sparse_embedding.get_scores_normalized(query):
+                sparse_scores[doc_id] = score
+        
+        # Build dense scores map
+        dense_scores = {vr.id: vr.score for vr in vector_results}
+        
+        # Get all candidate doc IDs
+        all_doc_ids = set(dense_scores.keys()) | set(sparse_scores.keys())
+        
+        # Combine scores
+        combined_results = []
+        for doc_id in all_doc_ids:
+            dense_score = dense_scores.get(doc_id, 0.0)
+            sparse_score = sparse_scores.get(doc_id, 0.0)
+            
+            # Weighted combination
+            final_score = (1 - self.hybrid_weight) * sparse_score + self.hybrid_weight * dense_score
+            
+            combined_results.append((doc_id, final_score))
+        
+        # Sort by combined score descending
+        combined_results.sort(key=lambda x: x[1], reverse=True)
+        
+        # Fetch screenshot data and build results
+        results = []
+        for doc_id, score in combined_results[:search_limit]:
+            screenshot = self.db.get_by_id(doc_id)
+            if screenshot:
+                results.append(SearchResult(
+                    screenshot=screenshot,
+                    score=score,
+                    search_type="hybrid",
+                ))
+        
+        # Apply reranking if enabled
+        if self.use_reranker and results:
+            results = self._rerank_results(query, results, limit, search_type="hybrid+rerank")
+        else:
+            results = results[:limit]
+        
+        return results
+    
+    def _sparse_only_search(
+        self,
+        query: str,
+        limit: int,
+    ) -> list[SearchResult]:
+        """Perform sparse-only search when dense embedding fails."""
+        if not self.sparse_embedding or not self.sparse_embedding.is_fitted:
+            return []
+        
+        results = []
+        for doc_id, score in self.sparse_embedding.get_scores_normalized(query)[:limit]:
+            screenshot = self.db.get_by_id(doc_id)
+            if screenshot:
+                results.append(SearchResult(
+                    screenshot=screenshot,
+                    score=score,
+                    search_type="sparse",
+                ))
+        
+        return results
+    
     def _rerank_results(
         self,
         query: str,
         results: list[SearchResult],
         limit: int,
+        search_type: str = "vector+rerank",
     ) -> list[SearchResult]:
         """Rerank results using cross-encoder."""
         if not self.reranker or not results:
@@ -182,7 +296,7 @@ class SearchEngine:
             reranked_results.append(SearchResult(
                 screenshot=result.screenshot,
                 score=score,
-                search_type="vector+rerank",
+                search_type=search_type,
             ))
         
         return reranked_results
@@ -211,3 +325,4 @@ class SearchEngine:
         else:
             # Multiple words: phrase match
             return f'"{query}"'
+

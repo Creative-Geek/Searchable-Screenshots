@@ -19,40 +19,71 @@ class EmbeddingService:
         self._client = httpx.Client(timeout=timeout)
         self._dimension: Optional[int] = None
     
-    def embed(self, text: str) -> Optional[list[float]]:
+    def embed(self, text: str, max_retries: int = 3) -> Optional[list[float]]:
         """Generate embedding vector for text.
         
         Args:
             text: Text to embed
+            max_retries: Number of retry attempts for transient failures
             
         Returns:
             Embedding vector as list of floats, or None if failed
         """
-        if not text or not text.strip():
+        # Validate input - check for empty or whitespace-only text
+        if not text:
             return None
         
-        try:
-            response = self._client.post(
-                f"{self.ollama_url}/api/embeddings",
-                json={
-                    "model": self.model,
-                    "prompt": text,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-            embedding = result.get("embedding")
-            
-            if embedding:
-                self._dimension = len(embedding)
-            
-            return embedding
-        except httpx.HTTPError as e:
-            print(f"Embedding API error: {e}")
+        cleaned_text = text.strip()
+        if not cleaned_text:
             return None
-        except Exception as e:
-            print(f"Embedding service failed: {e}")
-            return None
+        
+        # Retry loop for transient failures
+        import time
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = self._client.post(
+                    f"{self.ollama_url}/api/embeddings",
+                    json={
+                        "model": self.model,
+                        "prompt": cleaned_text,
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+                embedding = result.get("embedding")
+                
+                if embedding:
+                    self._dimension = len(embedding)
+                    return embedding
+                else:
+                    # Empty embedding returned - don't retry
+                    return None
+                    
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code >= 500:
+                    # Server error - retry with backoff
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                # Client error or final attempt - don't retry
+                print(f"Embedding API error: {e}")
+                return None
+            except httpx.HTTPError as e:
+                last_error = e
+                # Network error - retry with backoff
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                print(f"Embedding API error: {e}")
+                return None
+            except Exception as e:
+                print(f"Embedding service failed: {e}")
+                return None
+        
+        return None
     
     async def embed_async(self, text: str) -> Optional[list[float]]:
         """Async version of embed()."""

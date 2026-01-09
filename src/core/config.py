@@ -49,12 +49,16 @@ class AppConfig:
     scan_folders: list[ScanFolder] = field(default_factory=list)
     api: APIConfig = field(default_factory=APIConfig)
     use_reranker: bool = False
+    hybrid_search_weight: float = 0.5  # 0.0 = sparse only, 1.0 = dense only
+    parallel_processing: int = 1  # 1-20, concurrent images during indexing
     
     def to_dict(self) -> dict:
         return {
             "scan_folders": [f.to_dict() for f in self.scan_folders],
             "api": self.api.to_dict(),
             "use_reranker": self.use_reranker,
+            "hybrid_search_weight": self.hybrid_search_weight,
+            "parallel_processing": self.parallel_processing,
         }
     
     @classmethod
@@ -63,6 +67,8 @@ class AppConfig:
             scan_folders=[ScanFolder.from_dict(f) for f in data.get("scan_folders", [])],
             api=APIConfig.from_dict(data.get("api", {})),
             use_reranker=data.get("use_reranker", False),
+            hybrid_search_weight=data.get("hybrid_search_weight", 0.5),
+            parallel_processing=data.get("parallel_processing", 1),
         )
 
 
@@ -140,3 +146,9 @@ class ConfigManager:
         """Get the Qdrant vector store directory path."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         return self.data_dir / "vectors"
+    
+    @property
+    def sparse_index_path(self) -> Path:
+        """Get the BM25 sparse index file path."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        return self.data_dir / "bm25_index.pkl"
